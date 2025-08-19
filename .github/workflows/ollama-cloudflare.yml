@@ -46,15 +46,8 @@ jobs:
           mkdir -p logs
           
           # CRITICAL: Configure Ollama for Cloudflare Tunnel access
-          # Based on the FAQ: "How can I use Ollama with Cloudflare Tunnel?"
-          # We need to bind to localhost and let cloudflared handle the host headers
           export OLLAMA_HOST="localhost:11434"
-          
-          # CRITICAL: Configure CORS to allow Cloudflare tunnel domains
-          # Cloudflare tunnels use *.trycloudflare.com domains
           export OLLAMA_ORIGINS="https://*.trycloudflare.com,http://localhost:11434,http://127.0.0.1:11434"
-          
-          # Additional performance settings
           export OLLAMA_KEEP_ALIVE="15m"
           export OLLAMA_MAX_LOADED_MODELS="1"
           export OLLAMA_MAX_QUEUE="10"
@@ -63,11 +56,9 @@ jobs:
           echo "  OLLAMA_HOST: $OLLAMA_HOST"
           echo "  OLLAMA_ORIGINS: $OLLAMA_ORIGINS"
           
-          # Start Ollama in background
           nohup ollama serve > logs/ollama.log 2>&1 &
           echo $! > ollama.pid
           
-          # Wait for Ollama to be ready with better error handling
           echo "⏳ Waiting for Ollama to initialize..."
           for i in {1..60}; do
             if curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
@@ -90,16 +81,12 @@ jobs:
           echo "📥 Downloading Qwen3 model..."
           export OLLAMA_HOST="localhost:11434"
           
-          # Pull model with timeout
           timeout 300 ollama pull qwen3:0.6b || {
             echo "❌ Model download failed or timed out"
-            echo "📋 Available space:"
             df -h
-            echo "📋 Ollama logs:"
             tail -50 logs/ollama.log
             exit 1
           }
-          
           echo "✅ Model downloaded successfully"
           
       # Test Ollama locally before exposing
@@ -108,43 +95,31 @@ jobs:
           echo "🧪 Testing Ollama locally..."
           export OLLAMA_HOST="localhost:11434"
           
-          # Test API
-          echo "Testing API endpoints..."
           curl -s http://localhost:11434/api/tags | jq . || exit 1
           
-          # Test generation with timeout
           echo "Testing text generation..."
           timeout 30 ollama run qwen3:0.6b "Hello! Say 'Hi' back." || {
             echo "❌ Local test failed"
             tail -20 logs/ollama.log
             exit 1
           }
-          
           echo "✅ Local tests passed"
           
       # Install Cloudflared
       - name: Install Cloudflared
         run: |
           echo "📦 Installing Cloudflared..."
-          
-          # Download and install cloudflared
           wget -q -O cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb || {
             echo "❌ Cloudflared installation failed"
             exit 1
           }
-          
-          # Verify installation
           cloudflared --version
           
       # Start Cloudflare Tunnel with PROPER configuration
       - name: Create Cloudflare Tunnel (With Host Headers)
         run: |
           echo "🌐 Creating Cloudflare tunnel with proper host header configuration..."
-          
-          # CRITICAL: Use the exact configuration from FAQ
-          # "How can I use Ollama with Cloudflare Tunnel?"
-          # Use --http-host-header to set the correct Host header
           nohup cloudflared tunnel --url http://localhost:11434 --http-host-header="localhost:11434" > logs/cloudflared.log 2>&1 &
           echo $! > cloudflared.pid
           
@@ -152,7 +127,6 @@ jobs:
           echo "  Target: http://localhost:11434"
           echo "  Host Header: localhost:11434"
           
-          # Wait for tunnel URL with better parsing
           echo "⏳ Waiting for tunnel to establish..."
           for i in {1..60}; do
             if grep -q "https://.*\.trycloudflare\.com" logs/cloudflared.log; then
@@ -164,7 +138,6 @@ jobs:
             fi
             if [ $i -eq 60 ]; then
               echo "❌ Tunnel failed to establish"
-              echo "📋 Cloudflared logs:"
               cat logs/cloudflared.log
               exit 1
             fi
@@ -187,24 +160,11 @@ jobs:
           echo "  • Chat:           POST $TUNNEL_URL/api/chat"
           echo ""
           echo "🧪 Example cURL commands:"
-          echo "  # List models"
           echo "  curl '$TUNNEL_URL/api/tags'"
-          echo ""
-          echo "  # Generate text"
-          echo "  curl -X POST '$TUNNEL_URL/api/generate' \\"
-          echo "    -H 'Content-Type: application/json' \\"
-          echo "    -d '{\"model\":\"qwen3:0.6b\",\"prompt\":\"Hello world!\",\"stream\":false}'"
-          echo ""
-          echo "  # Chat"
-          echo "  curl -X POST '$TUNNEL_URL/api/chat' \\"
-          echo "    -H 'Content-Type: application/json' \\"
-          echo "    -d '{\"model\":\"qwen3:0.6b\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"stream\":false}'"
-          echo ""
-          echo "🔧 CORS Configuration:"
-          echo "  Ollama is configured to accept requests from *.trycloudflare.com"
-          echo "  Host header is properly forwarded by cloudflared"
+          echo "  curl -X POST '$TUNNEL_URL/api/generate' -H 'Content-Type: application/json' -d '{\"model\":\"qwen3:0.6b\",\"prompt\":\"Hello world!\",\"stream\":false}'"
+          echo "  curl -X POST '$TUNNEL_URL/api/chat' -H 'Content-Type: application/json' -d '{\"model\":\"qwen3:0.6b\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"stream\":false}'"
           echo "==========================================="
-
+          
       # Log tunnel URL for n8n extraction
       - name: Log Tunnel URL for n8n
         run: |
@@ -213,21 +173,18 @@ jobs:
           echo "TUNNEL_URL: $TUNNEL_URL"
           echo "=== N8N_EXTRACT_END ==="
 
-      # Notify n8n webhook (conditionally)
+      # Notify n8n webhook (hardcoded)
       - name: Notify n8n Webhook
-        if: env.N8N_WEBHOOK_URL != ''
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
           echo "📡 Sending webhook notification to n8n..."
           
-          # Extract data from GitHub event (if triggered by repository_dispatch)
           CHAT_ID="${{ github.event.client_payload.telegram_chat_id || 'unknown' }}"
           USER_ID="${{ github.event.client_payload.user_id || 'unknown' }}"
           ORIGINAL_MESSAGE="${{ github.event.client_payload.original_message || 'Manual start' }}"
           TIMESTAMP="${{ github.event.client_payload.timestamp || github.event.head_commit.timestamp }}"
           
-          # Send webhook to n8n
-          curl -X POST "$N8N_WEBHOOK_URL" \
+          curl -X POST "https://n8n-nightly-liyp.onrender.com/webhook/ollama-ready" \
             -H "Content-Type: application/json" \
             -d "{
               \"tunnel_url\": \"$TUNNEL_URL\",
@@ -241,7 +198,7 @@ jobs:
             }" || echo "⚠️ Webhook notification failed (non-critical)"
           
           echo "✅ Webhook notification sent!"
-
+          
       # Keep services running for 15 minutes
       - name: Keep Services Running
         run: |
@@ -249,9 +206,7 @@ jobs:
           echo "🔄 Keeping services running for 15 minutes..."
           echo "🔗 Access your Ollama at: $TUNNEL_URL"
           
-          # Run for 15 minutes (900 seconds)
           for i in {1..900}; do
-            # Show status every 3 minutes (180 seconds)
             if [ $((i % 180)) -eq 0 ]; then
               minutes_elapsed=$((i / 60))
               remaining_minutes=$((15 - minutes_elapsed))
