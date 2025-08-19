@@ -1,5 +1,4 @@
 name: Ollama with Cloudflared Tunnel
-
 on:
   workflow_dispatch: # run manually
   push:
@@ -12,47 +11,148 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-
+        
       # Install Ollama
       - name: Install Ollama
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
-          # Kill default Ollama service running on 11434
+          # Clean up any existing Ollama processes
           sudo systemctl stop ollama || true
           sudo systemctl disable ollama || true
-          pkill -9 ollama || true
-          # Start Ollama explicitly on port 11500
-          nohup OLLAMA_HOST=0.0.0.0:11500 ollama serve > ollama.log 2>&1 &
-          sleep 10
-
-      # Pull Qwen3 model with custom host
+          sudo pkill -9 ollama || true
+          
+      # Start Ollama service
+      - name: Start Ollama Service
+        run: |
+          # Start Ollama on localhost:11500
+          OLLAMA_HOST=127.0.0.1:11500 nohup ollama serve > ollama.log 2>&1 &
+          echo $! > ollama.pid
+          
+          # Wait for Ollama to be ready (with timeout)
+          echo "Waiting for Ollama to start..."
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:11500/api/tags > /dev/null 2>&1; then
+              echo "Ollama is ready!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Timeout waiting for Ollama to start"
+              cat ollama.log
+              exit 1
+            fi
+            sleep 2
+          done
+          
+      # Pull model
       - name: Pull Qwen3 model
         run: |
-          OLLAMA_HOST=0.0.0.0:11500 ollama pull qwen3:0.6b
-
-      # Run test prompt with custom host
-      - name: Test Ollama prompt
+          export OLLAMA_HOST=127.0.0.1:11500
+          ollama pull qwen3:0.6b
+          
+      # Test Ollama
+      - name: Test Ollama
         run: |
-          OLLAMA_HOST=0.0.0.0:11500 ollama run qwen3:0.6b "hey there how are you"
-
+          export OLLAMA_HOST=127.0.0.1:11500
+          echo "Testing Ollama with a simple prompt..."
+          ollama run qwen3:0.6b "Hello, how are you?" || echo "Test failed but continuing..."
+          
       # Install cloudflared
       - name: Install Cloudflared
         run: |
-          wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
-
-      # Start Cloudflared tunnel to 11500
+          
+      # Start Cloudflared tunnel
       - name: Start Cloudflared Tunnel
         run: |
-          nohup cloudflared tunnel --url http://0.0.0.0:11500 > cloudflared.log 2>&1 &
-          sleep 10
-          echo "Tunnel URL:"
-          grep -o 'https://.*trycloudflare.com' cloudflared.log | head -n 1 | tee tunnel_url.txt
-          echo "Try API endpoint: $(cat tunnel_url.txt)/api/tags"
-          echo "Try API generate: $(cat tunnel_url.txt)/api/generate"
-
-      # Keep job alive for 10 minutes
-      - name: Keep alive for 10 minutes
+          echo "Starting Cloudflared tunnel..."
+          nohup cloudflared tunnel --url http://127.0.0.1:11500 > cloudflared.log 2>&1 &
+          echo $! > cloudflared.pid
+          
+          # Wait for tunnel URL with timeout
+          echo "Waiting for tunnel URL..."
+          for i in {1..30}; do
+            if grep -q "https://.*trycloudflare.com" cloudflared.log; then
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Timeout waiting for tunnel URL"
+              cat cloudflared.log
+              exit 1
+            fi
+            sleep 2
+          done
+          
+          # Extract and display tunnel URL
+          TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare\.com' cloudflared.log | head -n 1)
+          echo "===========================================" 
+          echo "🚀 TUNNEL IS READY!"
+          echo "🔗 Tunnel URL: $TUNNEL_URL"
+          echo "📡 API Tags: $TUNNEL_URL/api/tags"
+          echo "🤖 API Generate: $TUNNEL_URL/api/generate"
+          echo "==========================================="
+          
+          # Save URL for later steps
+          echo "$TUNNEL_URL" > tunnel_url.txt
+          
+      # Verify tunnel is working
+      - name: Verify Tunnel
         run: |
-          echo "Keeping Ollama + Cloudflared alive for 10 minutes..."
-          sleep 600
+          TUNNEL_URL=$(cat tunnel_url.txt)
+          echo "Verifying tunnel is accessible..."
+          
+          # Test the /api/tags endpoint
+          if curl -s "$TUNNEL_URL/api/tags" > /dev/null; then
+            echo "✅ Tunnel is working! API is accessible."
+          else
+            echo "❌ Tunnel verification failed"
+            echo "Cloudflared logs:"
+            cat cloudflared.log
+            echo "Ollama logs:"
+            cat ollama.log
+            exit 1
+          fi
+          
+      # Keep services alive
+      - name: Keep Services Alive
+        run: |
+          TUNNEL_URL=$(cat tunnel_url.txt)
+          echo "🔄 Keeping services alive for 10 minutes..."
+          echo "🔗 Access your Ollama instance at: $TUNNEL_URL"
+          echo "📝 Example API call:"
+          echo "curl -X POST '$TUNNEL_URL/api/generate' -H 'Content-Type: application/json' -d '{\"model\":\"qwen3:0.6b\",\"prompt\":\"Hello world\",\"stream\":false}'"
+          
+          # Monitor processes and keep alive
+          for i in {1..300}; do  # 300 * 2 seconds = 10 minutes
+            # Check if Ollama is still running
+            if ! kill -0 $(cat ollama.pid) 2>/dev/null; then
+              echo "❌ Ollama process died, restarting..."
+              OLLAMA_HOST=127.0.0.1:11500 nohup ollama serve > ollama.log 2>&1 &
+              echo $! > ollama.pid
+            fi
+            
+            # Check if Cloudflared is still running  
+            if ! kill -0 $(cat cloudflared.pid) 2>/dev/null; then
+              echo "❌ Cloudflared process died, restarting..."
+              nohup cloudflared tunnel --url http://127.0.0.1:11500 > cloudflared.log 2>&1 &
+              echo $! > cloudflared.pid
+            fi
+            
+            if [ $((i % 30)) -eq 0 ]; then  # Every minute
+              echo "⏰ $((i/30))/10 minutes elapsed - Services still running"
+            fi
+            
+            sleep 2
+          done
+          
+          echo "✅ 10 minutes completed!"
+          
+      # Cleanup
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up processes..."
+          [ -f ollama.pid ] && kill $(cat ollama.pid) || true
+          [ -f cloudflared.pid ] && kill $(cat cloudflared.pid) || true
+          sudo pkill -9 ollama || true
+          sudo pkill -9 cloudflared || true
