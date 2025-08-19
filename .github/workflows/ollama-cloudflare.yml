@@ -1,10 +1,11 @@
-name: Ollama with Cloudflare Tunnel (Properly Configured)
 on:
   workflow_dispatch: # run manually
+  repository_dispatch: # triggered by n8n via GitHub API
+    types: [start_ollama]
   push:
     branches:
       - main
-
+      
 jobs:
   run-ollama:
     runs-on: ubuntu-latest
@@ -203,15 +204,45 @@ jobs:
           echo "  Ollama is configured to accept requests from *.trycloudflare.com"
           echo "  Host header is properly forwarded by cloudflared"
           echo "==========================================="
-# Add this step after "Display Connection Info"
+
+      # Log tunnel URL for n8n extraction
       - name: Log Tunnel URL for n8n
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
-           echo "=== N8N_EXTRACT_START ==="
-           echo "TUNNEL_URL: $TUNNEL_URL"
-           echo "=== N8N_EXTRACT_END ==="    
-           
- # Keep services running for 15 minutes
+          echo "=== N8N_EXTRACT_START ==="
+          echo "TUNNEL_URL: $TUNNEL_URL"
+          echo "=== N8N_EXTRACT_END ==="
+
+      # Notify n8n webhook (conditionally)
+      - name: Notify n8n Webhook
+        if: env.N8N_WEBHOOK_URL != ''
+        run: |
+          TUNNEL_URL=$(cat tunnel_url.txt)
+          echo "📡 Sending webhook notification to n8n..."
+          
+          # Extract data from GitHub event (if triggered by repository_dispatch)
+          CHAT_ID="${{ github.event.client_payload.telegram_chat_id || 'unknown' }}"
+          USER_ID="${{ github.event.client_payload.user_id || 'unknown' }}"
+          ORIGINAL_MESSAGE="${{ github.event.client_payload.original_message || 'Manual start' }}"
+          TIMESTAMP="${{ github.event.client_payload.timestamp || github.event.head_commit.timestamp }}"
+          
+          # Send webhook to n8n
+          curl -X POST "$N8N_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"tunnel_url\": \"$TUNNEL_URL\",
+              \"chat_id\": \"$CHAT_ID\",
+              \"user_id\": \"$USER_ID\",
+              \"original_message\": \"$ORIGINAL_MESSAGE\",
+              \"timestamp\": \"$TIMESTAMP\",
+              \"status\": \"ready\",
+              \"github_run_id\": \"${{ github.run_id }}\",
+              \"github_workflow\": \"${{ github.workflow }}\"
+            }" || echo "⚠️ Webhook notification failed (non-critical)"
+          
+          echo "✅ Webhook notification sent!"
+
+      # Keep services running for 15 minutes
       - name: Keep Services Running
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
