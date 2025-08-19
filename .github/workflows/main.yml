@@ -1,4 +1,4 @@
-name: Ollama with Cloudflare Tunnel (Production Ready)
+name: Ollama with Cloudflare Tunnel (Properly Configured)
 on:
   workflow_dispatch: # run manually
   push:
@@ -36,19 +36,31 @@ jobs:
           which ollama || (echo "❌ Ollama installation failed" && exit 1)
           ollama --version
           
-      # Start Ollama with proper configuration
-      - name: Start Ollama Server
+      # Start Ollama with PROPER Cloudflare Tunnel configuration
+      - name: Start Ollama Server (Cloudflare Tunnel Ready)
         run: |
-          echo "🚀 Starting Ollama server..."
+          echo "🚀 Starting Ollama server with Cloudflare Tunnel configuration..."
           
           # Create logs directory
           mkdir -p logs
           
-          # Start Ollama with proper binding and CORS settings
-          export OLLAMA_HOST="0.0.0.0:11434"
-          export OLLAMA_ORIGINS="*"
-          export OLLAMA_KEEP_ALIVE="10m"
+          # CRITICAL: Configure Ollama for Cloudflare Tunnel access
+          # Based on the FAQ: "How can I use Ollama with Cloudflare Tunnel?"
+          # We need to bind to localhost and let cloudflared handle the host headers
+          export OLLAMA_HOST="localhost:11434"
+          
+          # CRITICAL: Configure CORS to allow Cloudflare tunnel domains
+          # Cloudflare tunnels use *.trycloudflare.com domains
+          export OLLAMA_ORIGINS="https://*.trycloudflare.com,http://localhost:11434,http://127.0.0.1:11434"
+          
+          # Additional performance settings
+          export OLLAMA_KEEP_ALIVE="15m"
           export OLLAMA_MAX_LOADED_MODELS="1"
+          export OLLAMA_MAX_QUEUE="10"
+          
+          echo "🔧 Ollama Configuration:"
+          echo "  OLLAMA_HOST: $OLLAMA_HOST"
+          echo "  OLLAMA_ORIGINS: $OLLAMA_ORIGINS"
           
           # Start Ollama in background
           nohup ollama serve > logs/ollama.log 2>&1 &
@@ -58,7 +70,7 @@ jobs:
           echo "⏳ Waiting for Ollama to initialize..."
           for i in {1..60}; do
             if curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
-              echo "✅ Ollama is ready on port 11434!"
+              echo "✅ Ollama is ready on localhost:11434!"
               break
             fi
             if [ $i -eq 60 ]; then
@@ -124,14 +136,20 @@ jobs:
           # Verify installation
           cloudflared --version
           
-      # Start Cloudflare Tunnel
-      - name: Create Cloudflare Tunnel
+      # Start Cloudflare Tunnel with PROPER configuration
+      - name: Create Cloudflare Tunnel (With Host Headers)
         run: |
-          echo "🌐 Creating Cloudflare tunnel..."
+          echo "🌐 Creating Cloudflare tunnel with proper host header configuration..."
           
-          # Start tunnel in background
-          nohup cloudflared tunnel --url http://localhost:11434 > logs/cloudflared.log 2>&1 &
+          # CRITICAL: Use the exact configuration from FAQ
+          # "How can I use Ollama with Cloudflare Tunnel?"
+          # Use --http-host-header to set the correct Host header
+          nohup cloudflared tunnel --url http://localhost:11434 --http-host-header="localhost:11434" > logs/cloudflared.log 2>&1 &
           echo $! > cloudflared.pid
+          
+          echo "🔧 Cloudflare Tunnel Configuration:"
+          echo "  Target: http://localhost:11434"
+          echo "  Host Header: localhost:11434"
           
           # Wait for tunnel URL with better parsing
           echo "⏳ Waiting for tunnel to establish..."
@@ -153,48 +171,62 @@ jobs:
             sleep 2
           done
           
-      # Wait for tunnel to be fully ready
-      - name: Verify Tunnel Connectivity
+      # Wait for tunnel to be fully ready with proper CORS testing
+      - name: Verify Tunnel Connectivity (with CORS)
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
-          echo "🔍 Verifying tunnel connectivity..."
+          echo "🔍 Verifying tunnel connectivity with CORS headers..."
           echo "Testing URL: $TUNNEL_URL"
           
-          # Wait for tunnel to be fully accessible
-          for i in {1..30}; do
-            if curl -s -f --max-time 10 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
-              echo "✅ Tunnel is fully accessible!"
+          # Wait for tunnel to be fully accessible with CORS headers
+          for i in {1..40}; do
+            # Test with proper CORS headers that match our OLLAMA_ORIGINS
+            if curl -s -f --max-time 10 \
+                -H "Origin: $TUNNEL_URL" \
+                -H "Access-Control-Request-Method: GET" \
+                "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
+              echo "✅ Tunnel is fully accessible with CORS!"
               break
             fi
-            if [ $i -eq 30 ]; then
+            if [ $i -eq 40 ]; then
               echo "❌ Tunnel accessibility timeout"
+              echo "📋 Testing without CORS headers:"
+              curl -v "$TUNNEL_URL/api/tags" || echo "Failed"
               echo "📋 Direct Ollama test:"
               curl -s http://localhost:11434/api/tags || echo "Direct access failed"
               echo "📋 Cloudflared logs:"
-              tail -20 logs/cloudflared.log
+              tail -30 logs/cloudflared.log
+              echo "📋 Ollama logs:"
+              tail -20 logs/ollama.log
               exit 1
             fi
-            echo "  Waiting for tunnel accessibility... $i/30"
+            echo "  Waiting for tunnel accessibility... $i/40"
             sleep 5
           done
           
-      # Comprehensive API Testing
-      - name: Test API Through Tunnel
+      # Comprehensive API Testing with CORS
+      - name: Test API Through Tunnel (with CORS)
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
-          echo "🧪 Testing API through tunnel..."
+          echo "🧪 Testing API through tunnel with proper headers..."
           
-          # Test 1: List models
+          # Test 1: List models with CORS
           echo "Test 1: Listing available models..."
-          curl -s -f "$TUNNEL_URL/api/tags" | jq . || {
+          curl -s -f \
+            -H "Origin: $TUNNEL_URL" \
+            -H "Content-Type: application/json" \
+            "$TUNNEL_URL/api/tags" | jq . || {
             echo "❌ Models API test failed"
+            echo "📋 Trying without CORS headers:"
+            curl -v "$TUNNEL_URL/api/tags"
             exit 1
           }
           
-          # Test 2: Generate text (non-streaming)
+          # Test 2: Generate text (non-streaming) with CORS
           echo "Test 2: Testing text generation (non-streaming)..."
           curl -s -f -X POST "$TUNNEL_URL/api/generate" \
             -H "Content-Type: application/json" \
+            -H "Origin: $TUNNEL_URL" \
             -d '{
               "model": "qwen3:0.6b",
               "prompt": "Say hello in one word:",
@@ -205,10 +237,11 @@ jobs:
             exit 1
           }
           
-          # Test 3: Chat API
+          # Test 3: Chat API with CORS
           echo "Test 3: Testing chat API..."
           curl -s -f -X POST "$TUNNEL_URL/api/chat" \
             -H "Content-Type: application/json" \
+            -H "Origin: $TUNNEL_URL" \
             -d '{
               "model": "qwen3:0.6b",
               "messages": [{"role": "user", "content": "Hi"}],
@@ -248,10 +281,14 @@ jobs:
           echo "  curl -X POST '$TUNNEL_URL/api/chat' \\"
           echo "    -H 'Content-Type: application/json' \\"
           echo "    -d '{\"model\":\"qwen3:0.6b\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"stream\":false}'"
+          echo ""
+          echo "🔧 CORS Configuration:"
+          echo "  Ollama is configured to accept requests from *.trycloudflare.com"
+          echo "  Host header is properly forwarded by cloudflared"
           echo "==========================================="
           
       # Keep services alive with health monitoring
-      - name: Keep Services Alive
+      - name: Keep Services Alive with CORS Monitoring
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
           echo "🔄 Monitoring services for 12 minutes..."
@@ -268,24 +305,25 @@ jobs:
             fi
           }
           
-          # Function to restart Ollama
+          # Function to restart Ollama with proper CORS config
           restart_ollama() {
-            echo "🔄 Restarting Ollama..."
+            echo "🔄 Restarting Ollama with CORS configuration..."
             kill $(cat ollama.pid) 2>/dev/null || true
-            export OLLAMA_HOST="0.0.0.0:11434"
-            export OLLAMA_ORIGINS="*"
+            export OLLAMA_HOST="localhost:11434"
+            export OLLAMA_ORIGINS="https://*.trycloudflare.com,http://localhost:11434,http://127.0.0.1:11434"
+            export OLLAMA_KEEP_ALIVE="15m"
             nohup ollama serve > logs/ollama.log 2>&1 &
             echo $! > ollama.pid
-            sleep 10
+            sleep 15
           }
           
-          # Function to restart tunnel
+          # Function to restart tunnel with host headers
           restart_tunnel() {
-            echo "🔄 Restarting tunnel..."
+            echo "🔄 Restarting tunnel with host header configuration..."
             kill $(cat cloudflared.pid) 2>/dev/null || true
-            nohup cloudflared tunnel --url http://localhost:11434 > logs/cloudflared.log 2>&1 &
+            nohup cloudflared tunnel --url http://localhost:11434 --http-host-header="localhost:11434" > logs/cloudflared.log 2>&1 &
             echo $! > cloudflared.pid
-            sleep 15
+            sleep 20
           }
           
           # Monitor for 12 minutes (360 * 2 seconds)
@@ -301,16 +339,23 @@ jobs:
               fi
             fi
             
-            # Health check every 2 minutes
+            # Health check every 2 minutes with CORS
             if [ $((i % 60)) -eq 0 ]; then
               minutes_elapsed=$((i / 30))
-              echo "⏰ $minutes_elapsed/12 minutes elapsed - Health check..."
+              echo "⏰ $minutes_elapsed/12 minutes elapsed - CORS Health check..."
               
-              if curl -s -f --max-time 10 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
-                model_count=$(curl -s "$TUNNEL_URL/api/tags" | jq '.models | length' 2>/dev/null || echo "0")
-                echo "✅ Services healthy - $model_count model(s) available"
+              if curl -s -f --max-time 10 \
+                  -H "Origin: $TUNNEL_URL" \
+                  "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
+                model_count=$(curl -s -H "Origin: $TUNNEL_URL" "$TUNNEL_URL/api/tags" | jq '.models | length' 2>/dev/null || echo "0")
+                echo "✅ Services healthy with CORS - $model_count model(s) available"
               else
-                echo "⚠️  Health check failed - services may be recovering"
+                echo "⚠️  CORS Health check failed - testing without CORS..."
+                if curl -s -f --max-time 10 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
+                  echo "⚠️  Tunnel works but CORS may be failing"
+                else
+                  echo "❌ Complete tunnel failure"
+                fi
                 echo "📋 Last few Ollama log lines:"
                 tail -3 logs/ollama.log
               fi
@@ -340,11 +385,18 @@ jobs:
             TUNNEL_URL=$(cat tunnel_url.txt)
             echo "🔗 Final Tunnel URL: $TUNNEL_URL"
             
-            # Final connectivity test
-            if curl -s -f --max-time 5 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
-              echo "✅ Tunnel was accessible until the end"
+            # Final connectivity test with and without CORS
+            echo "🔍 Final connectivity tests:"
+            if curl -s -f --max-time 5 -H "Origin: $TUNNEL_URL" "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
+              echo "  ✅ Tunnel accessible WITH CORS headers"
             else
-              echo "❌ Tunnel became inaccessible"
+              echo "  ❌ Tunnel not accessible WITH CORS headers"
+            fi
+            
+            if curl -s -f --max-time 5 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
+              echo "  ✅ Tunnel accessible WITHOUT CORS headers"
+            else
+              echo "  ❌ Tunnel not accessible WITHOUT CORS headers"
             fi
           else
             echo "❌ No tunnel URL was generated"
