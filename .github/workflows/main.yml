@@ -204,141 +204,34 @@ jobs:
           echo "  Host header is properly forwarded by cloudflared"
           echo "==========================================="
           
-      # Keep services alive with health monitoring
-      - name: Keep Services Alive with CORS Monitoring
+ # Keep services running for 15 minutes
+      - name: Keep Services Running
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
-          echo "🔄 Monitoring services for 12 minutes..."
+          echo "🔄 Keeping services running for 15 minutes..."
+          echo "🔗 Access your Ollama at: $TUNNEL_URL"
           
-          # Function to check if process is running
-          check_process() {
-            local pid_file=$1
-            local name=$2
-            if [ -f "$pid_file" ] && kill -0 $(cat "$pid_file") 2>/dev/null; then
-              return 0
-            else
-              echo "⚠️  $name process is not running"
-              return 1
+          # Run for 15 minutes (900 seconds)
+          for i in {1..900}; do
+            # Show status every 3 minutes (180 seconds)
+            if [ $((i % 180)) -eq 0 ]; then
+              minutes_elapsed=$((i / 60))
+              remaining_minutes=$((15 - minutes_elapsed))
+              echo "⏰ $minutes_elapsed/15 minutes elapsed - $remaining_minutes minutes remaining"
             fi
-          }
-          
-          # Function to restart Ollama with proper CORS config
-          restart_ollama() {
-            echo "🔄 Restarting Ollama with CORS configuration..."
-            kill $(cat ollama.pid) 2>/dev/null || true
-            export OLLAMA_HOST="localhost:11434"
-            export OLLAMA_ORIGINS="https://*.trycloudflare.com,http://localhost:11434,http://127.0.0.1:11434"
-            export OLLAMA_KEEP_ALIVE="15m"
-            nohup ollama serve > logs/ollama.log 2>&1 &
-            echo $! > ollama.pid
-            sleep 15
-          }
-          
-          # Function to restart tunnel with host headers
-          restart_tunnel() {
-            echo "🔄 Restarting tunnel with host header configuration..."
-            kill $(cat cloudflared.pid) 2>/dev/null || true
-            nohup cloudflared tunnel --url http://localhost:11434 --http-host-header="localhost:11434" > logs/cloudflared.log 2>&1 &
-            echo $! > cloudflared.pid
-            sleep 20
-          }
-          
-          # Monitor for 12 minutes (360 * 2 seconds)
-          for i in {1..360}; do
-            # Check processes every 30 seconds
-            if [ $((i % 15)) -eq 0 ]; then
-              if ! check_process ollama.pid "Ollama"; then
-                restart_ollama
-              fi
-              
-              if ! check_process cloudflared.pid "Cloudflared"; then
-                restart_tunnel
-              fi
-            fi
-            
-            # Health check every 2 minutes with CORS
-            if [ $((i % 60)) -eq 0 ]; then
-              minutes_elapsed=$((i / 30))
-              echo "⏰ $minutes_elapsed/12 minutes elapsed - CORS Health check..."
-              
-              if curl -s -f --max-time 10 \
-                  -H "Origin: $TUNNEL_URL" \
-                  "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
-                model_count=$(curl -s -H "Origin: $TUNNEL_URL" "$TUNNEL_URL/api/tags" | jq '.models | length' 2>/dev/null || echo "0")
-                echo "✅ Services healthy with CORS - $model_count model(s) available"
-              else
-                echo "⚠️  CORS Health check failed - testing without CORS..."
-                if curl -s -f --max-time 10 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
-                  echo "⚠️  Tunnel works but CORS may be failing"
-                else
-                  echo "❌ Complete tunnel failure"
-                fi
-                echo "📋 Last few Ollama log lines:"
-                tail -3 logs/ollama.log
-              fi
-            fi
-            
-            # Show countdown every 2 minutes
-            if [ $((i % 60)) -eq 0 ] && [ $i -gt 0 ]; then
-              remaining_minutes=$(((360 - i) / 30))
-              echo "⏳ $remaining_minutes minutes remaining..."
-            fi
-            
-            sleep 2
+            sleep 1
           done
           
-          echo "✅ 12 minutes monitoring completed!"
+          echo "✅ 15 minutes completed!"
           echo "🔗 Final tunnel URL: $TUNNEL_URL"
           
-      # Final status and cleanup
-      - name: Final Status and Cleanup
+      # Cleanup
+      - name: Cleanup
         if: always()
         run: |
-          echo ""
-          echo "📊 FINAL STATUS REPORT"
-          echo "======================"
-          
-          if [ -f tunnel_url.txt ]; then
-            TUNNEL_URL=$(cat tunnel_url.txt)
-            echo "🔗 Final Tunnel URL: $TUNNEL_URL"
-            
-            # Final connectivity test with and without CORS
-            echo "🔍 Final connectivity tests:"
-            if curl -s -f --max-time 5 -H "Origin: $TUNNEL_URL" "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
-              echo "  ✅ Tunnel accessible WITH CORS headers"
-            else
-              echo "  ❌ Tunnel not accessible WITH CORS headers"
-            fi
-            
-            if curl -s -f --max-time 5 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
-              echo "  ✅ Tunnel accessible WITHOUT CORS headers"
-            else
-              echo "  ❌ Tunnel not accessible WITHOUT CORS headers"
-            fi
-          else
-            echo "❌ No tunnel URL was generated"
-          fi
-          
-          echo ""
-          echo "📋 Process Status:"
-          [ -f ollama.pid ] && kill -0 $(cat ollama.pid) 2>/dev/null && echo "  • Ollama: Running" || echo "  • Ollama: Stopped"
-          [ -f cloudflared.pid ] && kill -0 $(cat cloudflared.pid) 2>/dev/null && echo "  • Cloudflared: Running" || echo "  • Cloudflared: Stopped"
-          
-          echo ""
           echo "🧹 Cleaning up processes..."
           [ -f ollama.pid ] && kill $(cat ollama.pid) 2>/dev/null || true
           [ -f cloudflared.pid ] && kill $(cat cloudflared.pid) 2>/dev/null || true
-          
-          # Force cleanup
-          sleep 2
           sudo pkill -9 ollama 2>/dev/null || true
           sudo pkill -9 cloudflared 2>/dev/null || true
-          
           echo "✅ Cleanup completed"
-          
-          # Show final logs if there were issues
-          if [ -f logs/ollama.log ]; then
-            echo ""
-            echo "📋 Final Ollama logs (last 10 lines):"
-            tail -10 logs/ollama.log
-          fi
