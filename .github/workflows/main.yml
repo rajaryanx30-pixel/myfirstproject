@@ -18,21 +18,26 @@ jobs:
       - name: Install Ollama
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
-          # Start Ollama on custom port 11500, binding to 0.0.0.0
-          nohup ollama serve --host 0.0.0.0:11500 > ollama.log 2>&1 &
+          # Stop default Ollama service (running on 11434)
+          sudo systemctl stop ollama || true
+          sudo systemctl disable ollama || true
+          pkill -9 ollama || true
+          # Start Ollama on custom port 11500
+          export OLLAMA_HOST=0.0.0.0:11500
+          nohup ollama serve > ollama.log 2>&1 &
           sleep 10
 
-      # Pull Qwen3 model
+      # Pull Qwen3 model (using custom host)
       - name: Pull Qwen3 model
         run: |
+          export OLLAMA_HOST=0.0.0.0:11500
           ollama pull qwen3:0.6b
 
-      # Run test prompt
+      # Run test prompt (using custom host)
       - name: Test Ollama prompt
         run: |
-          curl http://127.0.0.1:11500/api/generate \
-            -d '{"model": "qwen3:0.6b", "prompt": "hey there how are you"}' \
-            -H "Content-Type: application/json"
+          export OLLAMA_HOST=0.0.0.0:11500
+          ollama run qwen3:0.6b "hey there how are you"
 
       # Install cloudflared
       - name: Install Cloudflared
@@ -40,7 +45,7 @@ jobs:
           wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
 
-      # Start Cloudflared tunnel
+      # Start Cloudflared tunnel (to port 11500)
       - name: Start Cloudflared Tunnel
         run: |
           nohup cloudflared tunnel --url http://0.0.0.0:11500 > cloudflared.log 2>&1 &
