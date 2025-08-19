@@ -1,0 +1,51 @@
+name: Ollama with Cloudflared Tunnel
+
+on:
+  workflow_dispatch: # run manually
+  push:
+    branches:
+      - main
+
+jobs:
+  run-ollama:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout repo
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Install Ollama
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          nohup ollama serve > ollama.log 2>&1 &
+          sleep 10
+
+      # Pull model
+      - name: Pull Qwen3 model
+        run: |
+          ollama pull qwen3:0.6b
+
+      # Run test prompt
+      - name: Test Ollama prompt
+        run: |
+          ollama run qwen3:0.6b "hey there how are you"
+
+      # Install cloudflared
+      - name: Install Cloudflared
+        run: |
+          wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      # Start Cloudflared tunnel
+      - name: Start Cloudflared Tunnel
+        run: |
+          nohup cloudflared tunnel --url http://localhost:11434 > cloudflared.log 2>&1 &
+          sleep 10
+          cat cloudflared.log | grep "trycloudflare.com" || true
+
+      # Show tunnel URL
+      - name: Extract Tunnel URL
+        run: |
+          echo "Tunnel URL:"
+          grep -o 'https://.*trycloudflare.com' cloudflared.log | head -n 1
