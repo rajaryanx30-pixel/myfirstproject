@@ -18,8 +18,8 @@ jobs:
       - name: Install Ollama
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
-          # Start Ollama on 0.0.0.0 instead of localhost
-          nohup ollama serve --host 0.0.0.0:11434 > ollama.log 2>&1 &
+          # Start Ollama on custom port 11500, binding to 0.0.0.0
+          nohup ollama serve --host 0.0.0.0:11500 > ollama.log 2>&1 &
           sleep 10
 
       # Pull Qwen3 model
@@ -30,7 +30,9 @@ jobs:
       # Run test prompt
       - name: Test Ollama prompt
         run: |
-          ollama run qwen3:0.6b "hey there how are you"
+          curl http://127.0.0.1:11500/api/generate \
+            -d '{"model": "qwen3:0.6b", "prompt": "hey there how are you"}' \
+            -H "Content-Type: application/json"
 
       # Install cloudflared
       - name: Install Cloudflared
@@ -41,10 +43,12 @@ jobs:
       # Start Cloudflared tunnel
       - name: Start Cloudflared Tunnel
         run: |
-          nohup cloudflared tunnel --url http://0.0.0.0:11434 > cloudflared.log 2>&1 &
+          nohup cloudflared tunnel --url http://0.0.0.0:11500 > cloudflared.log 2>&1 &
           sleep 10
           echo "Tunnel URL:"
-          grep -o 'https://.*trycloudflare.com' cloudflared.log | head -n 1
+          grep -o 'https://.*trycloudflare.com' cloudflared.log | head -n 1 | tee tunnel_url.txt
+          echo "Try API endpoint: $(cat tunnel_url.txt)/api/tags"
+          echo "Try API generate: $(cat tunnel_url.txt)/api/generate"
 
       # Keep job alive for 10 minutes
       - name: Keep alive for 10 minutes
