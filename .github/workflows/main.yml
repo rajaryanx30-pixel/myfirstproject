@@ -1,4 +1,4 @@
-name: Ollama with Cloudflared Tunnel (Fixed)
+name: Ollama with Cloudflare Tunnel (Production Ready)
 on:
   workflow_dispatch: # run manually
   push:
@@ -8,184 +8,368 @@ on:
 jobs:
   run-ollama:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # Set reasonable timeout
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         
-      # Install Ollama
-      - name: Install Ollama
+      - name: System Setup
         run: |
-          curl -fsSL https://ollama.com/install.sh | sh
-          # Clean up any existing Ollama processes
+          echo "🔧 Setting up system..."
+          sudo apt-get update -qq
+          sudo apt-get install -y curl wget jq
+          
+      # Clean install of Ollama
+      - name: Install and Configure Ollama
+        run: |
+          echo "📦 Installing Ollama..."
+          
+          # Clean up any existing processes
+          sudo pkill -9 ollama || true
           sudo systemctl stop ollama || true
           sudo systemctl disable ollama || true
-          sudo pkill -9 ollama || true
           
-      # SOLUTION 1: Use 0.0.0.0 host with wildcard CORS
-      - name: Start Ollama Service (0.0.0.0 + Wildcard CORS)
+          # Install Ollama
+          curl -fsSL https://ollama.com/install.sh | sh
+          
+          # Verify installation
+          which ollama || (echo "❌ Ollama installation failed" && exit 1)
+          ollama --version
+          
+      # Start Ollama with proper configuration
+      - name: Start Ollama Server
         run: |
-          echo "🚀 Starting Ollama on 0.0.0.0:11500 with wildcard CORS..."
-          # Key fix: Use 0.0.0.0 instead of 127.0.0.1 AND set OLLAMA_ORIGINS to wildcard
-          OLLAMA_HOST=0.0.0.0:11500 OLLAMA_ORIGINS="*" nohup ollama serve > ollama.log 2>&1 &
+          echo "🚀 Starting Ollama server..."
+          
+          # Create logs directory
+          mkdir -p logs
+          
+          # Start Ollama with proper binding and CORS settings
+          export OLLAMA_HOST="0.0.0.0:11434"
+          export OLLAMA_ORIGINS="*"
+          export OLLAMA_KEEP_ALIVE="10m"
+          export OLLAMA_MAX_LOADED_MODELS="1"
+          
+          # Start Ollama in background
+          nohup ollama serve > logs/ollama.log 2>&1 &
           echo $! > ollama.pid
           
-          # Wait for Ollama to be ready
-          echo "Waiting for Ollama to start..."
-          for i in {1..30}; do
-            if curl -s http://0.0.0.0:11500/api/tags > /dev/null 2>&1; then
-              echo "✅ Ollama is ready on 0.0.0.0:11500!"
+          # Wait for Ollama to be ready with better error handling
+          echo "⏳ Waiting for Ollama to initialize..."
+          for i in {1..60}; do
+            if curl -s -f http://localhost:11434/api/tags > /dev/null 2>&1; then
+              echo "✅ Ollama is ready on port 11434!"
               break
             fi
-            if [ $i -eq 30 ]; then
-              echo "❌ Timeout waiting for Ollama to start"
-              cat ollama.log
+            if [ $i -eq 60 ]; then
+              echo "❌ Ollama failed to start within 2 minutes"
+              echo "📋 Ollama logs:"
+              cat logs/ollama.log
               exit 1
             fi
+            echo "  Attempt $i/60..."
             sleep 2
           done
           
-      # Pull model
-      - name: Pull Qwen3 model
+      # Pull and verify model
+      - name: Setup Qwen3 Model
         run: |
-          export OLLAMA_HOST=0.0.0.0:11500
-          ollama pull qwen3:0.6b
+          echo "📥 Downloading Qwen3 model..."
+          export OLLAMA_HOST="localhost:11434"
           
-      # Test Ollama
-      - name: Test Ollama
+          # Pull model with timeout
+          timeout 300 ollama pull qwen3:0.6b || {
+            echo "❌ Model download failed or timed out"
+            echo "📋 Available space:"
+            df -h
+            echo "📋 Ollama logs:"
+            tail -50 logs/ollama.log
+            exit 1
+          }
+          
+          echo "✅ Model downloaded successfully"
+          
+      # Test Ollama locally before exposing
+      - name: Test Ollama Locally
         run: |
-          export OLLAMA_HOST=0.0.0.0:11500
-          echo "Testing Ollama with a simple prompt..."
-          ollama run qwen3:0.6b "Hello, how are you?" || echo "Test failed but continuing..."
+          echo "🧪 Testing Ollama locally..."
+          export OLLAMA_HOST="localhost:11434"
           
-      # Install cloudflared
+          # Test API
+          echo "Testing API endpoints..."
+          curl -s http://localhost:11434/api/tags | jq . || exit 1
+          
+          # Test generation with timeout
+          echo "Testing text generation..."
+          timeout 30 ollama run qwen3:0.6b "Hello! Say 'Hi' back." || {
+            echo "❌ Local test failed"
+            tail -20 logs/ollama.log
+            exit 1
+          }
+          
+          echo "✅ Local tests passed"
+          
+      # Install Cloudflared
       - name: Install Cloudflared
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+          echo "📦 Installing Cloudflared..."
           
-      # Start Cloudflared tunnel pointing to 0.0.0.0
-      - name: Start Cloudflared Tunnel
+          # Download and install cloudflared
+          wget -q -O cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb || {
+            echo "❌ Cloudflared installation failed"
+            exit 1
+          }
+          
+          # Verify installation
+          cloudflared --version
+          
+      # Start Cloudflare Tunnel
+      - name: Create Cloudflare Tunnel
         run: |
-          echo "Starting Cloudflared tunnel..."
-          # Point tunnel to 0.0.0.0:11500 instead of 127.0.0.1:11500
-          nohup cloudflared tunnel --url http://0.0.0.0:11500 > cloudflared.log 2>&1 &
+          echo "🌐 Creating Cloudflare tunnel..."
+          
+          # Start tunnel in background
+          nohup cloudflared tunnel --url http://localhost:11434 > logs/cloudflared.log 2>&1 &
           echo $! > cloudflared.pid
           
-          # Wait for tunnel URL with timeout
-          echo "Waiting for tunnel URL..."
-          for i in {1..30}; do
-            if grep -q "https://.*trycloudflare.com" cloudflared.log; then
+          # Wait for tunnel URL with better parsing
+          echo "⏳ Waiting for tunnel to establish..."
+          for i in {1..60}; do
+            if grep -q "https://.*\.trycloudflare\.com" logs/cloudflared.log; then
+              TUNNEL_URL=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' logs/cloudflared.log | head -1)
+              echo "✅ Tunnel established!"
+              echo "🔗 Tunnel URL: $TUNNEL_URL"
+              echo "$TUNNEL_URL" > tunnel_url.txt
               break
             fi
-            if [ $i -eq 30 ]; then
-              echo "Timeout waiting for tunnel URL"
-              cat cloudflared.log
+            if [ $i -eq 60 ]; then
+              echo "❌ Tunnel failed to establish"
+              echo "📋 Cloudflared logs:"
+              cat logs/cloudflared.log
               exit 1
             fi
+            echo "  Attempt $i/60..."
             sleep 2
           done
           
-          # Extract and display tunnel URL
-          TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare\.com' cloudflared.log | head -n 1)
-          echo "===========================================" 
-          echo "🚀 TUNNEL IS READY!"
-          echo "🔗 Tunnel URL: $TUNNEL_URL"
-          echo "📡 API Tags: $TUNNEL_URL/api/tags"
-          echo "🤖 API Generate: $TUNNEL_URL/api/generate"
-          echo "==========================================="
-          
-          # Save URL for later steps
-          echo "$TUNNEL_URL" > tunnel_url.txt
-          
-      # Verify tunnel is working
-      - name: Verify Tunnel
+      # Wait for tunnel to be fully ready
+      - name: Verify Tunnel Connectivity
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
-          echo "Verifying tunnel is accessible..."
+          echo "🔍 Verifying tunnel connectivity..."
+          echo "Testing URL: $TUNNEL_URL"
           
-          # Test the /api/tags endpoint through the tunnel
-          echo "Testing: $TUNNEL_URL/api/tags"
-          if curl -s -H "Accept: application/json" "$TUNNEL_URL/api/tags" > /dev/null; then
-            echo "✅ Tunnel is working! API is accessible."
-            echo "📋 Available models:"
-            curl -s "$TUNNEL_URL/api/tags" | jq . || curl -s "$TUNNEL_URL/api/tags"
-          else
-            echo "❌ Tunnel verification failed"
-            echo "🔍 Testing direct access to Ollama..."
-            curl -s http://0.0.0.0:11500/api/tags || echo "Direct access also failed"
-            echo "📝 Cloudflared logs:"
-            cat cloudflared.log
-            echo "📝 Ollama logs:"
-            tail -20 ollama.log
+          # Wait for tunnel to be fully accessible
+          for i in {1..30}; do
+            if curl -s -f --max-time 10 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
+              echo "✅ Tunnel is fully accessible!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "❌ Tunnel accessibility timeout"
+              echo "📋 Direct Ollama test:"
+              curl -s http://localhost:11434/api/tags || echo "Direct access failed"
+              echo "📋 Cloudflared logs:"
+              tail -20 logs/cloudflared.log
+              exit 1
+            fi
+            echo "  Waiting for tunnel accessibility... $i/30"
+            sleep 5
+          done
+          
+      # Comprehensive API Testing
+      - name: Test API Through Tunnel
+        run: |
+          TUNNEL_URL=$(cat tunnel_url.txt)
+          echo "🧪 Testing API through tunnel..."
+          
+          # Test 1: List models
+          echo "Test 1: Listing available models..."
+          curl -s -f "$TUNNEL_URL/api/tags" | jq . || {
+            echo "❌ Models API test failed"
             exit 1
-          fi
+          }
           
-      # Test API generate through tunnel
-      - name: Test API Generate
-        run: |
-          TUNNEL_URL=$(cat tunnel_url.txt)
-          echo "🧪 Testing text generation through tunnel..."
-          
-          # Test generate API
-          curl -X POST "$TUNNEL_URL/api/generate" \
+          # Test 2: Generate text (non-streaming)
+          echo "Test 2: Testing text generation (non-streaming)..."
+          curl -s -f -X POST "$TUNNEL_URL/api/generate" \
             -H "Content-Type: application/json" \
             -d '{
               "model": "qwen3:0.6b",
-              "prompt": "Hello, how are you?",
+              "prompt": "Say hello in one word:",
               "stream": false
             }' \
-            --max-time 30 \
-            --fail || echo "Generation test failed but continuing..."
+            --max-time 45 | jq . || {
+            echo "❌ Generation API test failed"
+            exit 1
+          }
           
-      # Keep services alive with monitoring
+          # Test 3: Chat API
+          echo "Test 3: Testing chat API..."
+          curl -s -f -X POST "$TUNNEL_URL/api/chat" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "qwen3:0.6b",
+              "messages": [{"role": "user", "content": "Hi"}],
+              "stream": false
+            }' \
+            --max-time 45 | jq . || {
+            echo "❌ Chat API test failed"
+            exit 1
+          }
+          
+          echo "✅ All API tests passed!"
+          
+      # Display connection information
+      - name: Display Connection Info
+        run: |
+          TUNNEL_URL=$(cat tunnel_url.txt)
+          echo ""
+          echo "🎉 OLLAMA IS NOW PUBLICLY ACCESSIBLE!"
+          echo "==========================================="
+          echo "🔗 Tunnel URL: $TUNNEL_URL"
+          echo ""
+          echo "📡 API Endpoints:"
+          echo "  • List Models:    GET  $TUNNEL_URL/api/tags"
+          echo "  • Generate Text:  POST $TUNNEL_URL/api/generate"
+          echo "  • Chat:           POST $TUNNEL_URL/api/chat"
+          echo ""
+          echo "🧪 Example cURL commands:"
+          echo "  # List models"
+          echo "  curl '$TUNNEL_URL/api/tags'"
+          echo ""
+          echo "  # Generate text"
+          echo "  curl -X POST '$TUNNEL_URL/api/generate' \\"
+          echo "    -H 'Content-Type: application/json' \\"
+          echo "    -d '{\"model\":\"qwen3:0.6b\",\"prompt\":\"Hello world!\",\"stream\":false}'"
+          echo ""
+          echo "  # Chat"
+          echo "  curl -X POST '$TUNNEL_URL/api/chat' \\"
+          echo "    -H 'Content-Type: application/json' \\"
+          echo "    -d '{\"model\":\"qwen3:0.6b\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"stream\":false}'"
+          echo "==========================================="
+          
+      # Keep services alive with health monitoring
       - name: Keep Services Alive
         run: |
           TUNNEL_URL=$(cat tunnel_url.txt)
-          echo "🔄 Keeping services alive for 10 minutes..."
-          echo "🔗 Access your Ollama instance at: $TUNNEL_URL"
-          echo "📝 Example API calls:"
-          echo "  curl '$TUNNEL_URL/api/tags'"
-          echo "  curl -X POST '$TUNNEL_URL/api/generate' -H 'Content-Type: application/json' -d '{\"model\":\"qwen3:0.6b\",\"prompt\":\"Hello world\",\"stream\":false}'"
+          echo "🔄 Monitoring services for 12 minutes..."
           
-          # Monitor processes and keep alive
-          for i in {1..300}; do  # 300 * 2 seconds = 10 minutes
-            # Check if Ollama is still running
-            if ! kill -0 $(cat ollama.pid) 2>/dev/null; then
-              echo "❌ Ollama process died, restarting..."
-              OLLAMA_HOST=0.0.0.0:11500 OLLAMA_ORIGINS="*" nohup ollama serve > ollama.log 2>&1 &
-              echo $! > ollama.pid
-              sleep 5
+          # Function to check if process is running
+          check_process() {
+            local pid_file=$1
+            local name=$2
+            if [ -f "$pid_file" ] && kill -0 $(cat "$pid_file") 2>/dev/null; then
+              return 0
+            else
+              echo "⚠️  $name process is not running"
+              return 1
             fi
-            
-            # Check if Cloudflared is still running  
-            if ! kill -0 $(cat cloudflared.pid) 2>/dev/null; then
-              echo "❌ Cloudflared process died, restarting..."
-              nohup cloudflared tunnel --url http://0.0.0.0:11500 > cloudflared.log 2>&1 &
-              echo $! > cloudflared.pid
-              sleep 5
+          }
+          
+          # Function to restart Ollama
+          restart_ollama() {
+            echo "🔄 Restarting Ollama..."
+            kill $(cat ollama.pid) 2>/dev/null || true
+            export OLLAMA_HOST="0.0.0.0:11434"
+            export OLLAMA_ORIGINS="*"
+            nohup ollama serve > logs/ollama.log 2>&1 &
+            echo $! > ollama.pid
+            sleep 10
+          }
+          
+          # Function to restart tunnel
+          restart_tunnel() {
+            echo "🔄 Restarting tunnel..."
+            kill $(cat cloudflared.pid) 2>/dev/null || true
+            nohup cloudflared tunnel --url http://localhost:11434 > logs/cloudflared.log 2>&1 &
+            echo $! > cloudflared.pid
+            sleep 15
+          }
+          
+          # Monitor for 12 minutes (360 * 2 seconds)
+          for i in {1..360}; do
+            # Check processes every 30 seconds
+            if [ $((i % 15)) -eq 0 ]; then
+              if ! check_process ollama.pid "Ollama"; then
+                restart_ollama
+              fi
+              
+              if ! check_process cloudflared.pid "Cloudflared"; then
+                restart_tunnel
+              fi
             fi
             
             # Health check every 2 minutes
-            if [ $((i % 60)) -eq 0 ]; then  
-              echo "⏰ $((i/30))/10 minutes elapsed - Health check..."
-              if curl -s --max-time 5 "$TUNNEL_URL/api/tags" > /dev/null; then
-                echo "✅ Services are healthy"
+            if [ $((i % 60)) -eq 0 ]; then
+              minutes_elapsed=$((i / 30))
+              echo "⏰ $minutes_elapsed/12 minutes elapsed - Health check..."
+              
+              if curl -s -f --max-time 10 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
+                model_count=$(curl -s "$TUNNEL_URL/api/tags" | jq '.models | length' 2>/dev/null || echo "0")
+                echo "✅ Services healthy - $model_count model(s) available"
               else
-                echo "⚠️  Health check failed, but services are running"
+                echo "⚠️  Health check failed - services may be recovering"
+                echo "📋 Last few Ollama log lines:"
+                tail -3 logs/ollama.log
               fi
+            fi
+            
+            # Show countdown every 2 minutes
+            if [ $((i % 60)) -eq 0 ] && [ $i -gt 0 ]; then
+              remaining_minutes=$(((360 - i) / 30))
+              echo "⏳ $remaining_minutes minutes remaining..."
             fi
             
             sleep 2
           done
           
-          echo "✅ 10 minutes completed!"
+          echo "✅ 12 minutes monitoring completed!"
+          echo "🔗 Final tunnel URL: $TUNNEL_URL"
           
-      # Cleanup
-      - name: Cleanup
+      # Final status and cleanup
+      - name: Final Status and Cleanup
         if: always()
         run: |
+          echo ""
+          echo "📊 FINAL STATUS REPORT"
+          echo "======================"
+          
+          if [ -f tunnel_url.txt ]; then
+            TUNNEL_URL=$(cat tunnel_url.txt)
+            echo "🔗 Final Tunnel URL: $TUNNEL_URL"
+            
+            # Final connectivity test
+            if curl -s -f --max-time 5 "$TUNNEL_URL/api/tags" > /dev/null 2>&1; then
+              echo "✅ Tunnel was accessible until the end"
+            else
+              echo "❌ Tunnel became inaccessible"
+            fi
+          else
+            echo "❌ No tunnel URL was generated"
+          fi
+          
+          echo ""
+          echo "📋 Process Status:"
+          [ -f ollama.pid ] && kill -0 $(cat ollama.pid) 2>/dev/null && echo "  • Ollama: Running" || echo "  • Ollama: Stopped"
+          [ -f cloudflared.pid ] && kill -0 $(cat cloudflared.pid) 2>/dev/null && echo "  • Cloudflared: Running" || echo "  • Cloudflared: Stopped"
+          
+          echo ""
           echo "🧹 Cleaning up processes..."
-          [ -f ollama.pid ] && kill $(cat ollama.pid) || true
-          [ -f cloudflared.pid ] && kill $(cat cloudflared.pid) || true
-          sudo pkill -9 ollama || true
-          sudo pkill -9 cloudflared || true
+          [ -f ollama.pid ] && kill $(cat ollama.pid) 2>/dev/null || true
+          [ -f cloudflared.pid ] && kill $(cat cloudflared.pid) 2>/dev/null || true
+          
+          # Force cleanup
+          sleep 2
+          sudo pkill -9 ollama 2>/dev/null || true
+          sudo pkill -9 cloudflared 2>/dev/null || true
+          
+          echo "✅ Cleanup completed"
+          
+          # Show final logs if there were issues
+          if [ -f logs/ollama.log ]; then
+            echo ""
+            echo "📋 Final Ollama logs (last 10 lines):"
+            tail -10 logs/ollama.log
+          fi
