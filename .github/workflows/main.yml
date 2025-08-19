@@ -24,8 +24,8 @@ jobs:
       # Start Ollama service
       - name: Start Ollama Service
         run: |
-          # Start Ollama on localhost:11500
-          OLLAMA_HOST=127.0.0.1:11500 nohup ollama serve > ollama.log 2>&1 &
+          # Start Ollama on localhost:11500 with wildcard CORS origins
+          OLLAMA_HOST=127.0.0.1:11500 OLLAMA_ORIGINS="*" nohup ollama serve > ollama.log 2>&1 &
           echo $! > ollama.pid
           
           # Wait for Ollama to be ready (with timeout)
@@ -127,7 +127,7 @@ jobs:
             # Check if Ollama is still running
             if ! kill -0 $(cat ollama.pid) 2>/dev/null; then
               echo "❌ Ollama process died, restarting..."
-              OLLAMA_HOST=127.0.0.1:11500 nohup ollama serve > ollama.log 2>&1 &
+              OLLAMA_HOST=127.0.0.1:11500 OLLAMA_ORIGINS="*" nohup ollama serve > ollama.log 2>&1 &
               echo $! > ollama.pid
             fi
             
