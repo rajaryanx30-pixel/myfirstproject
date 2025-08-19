@@ -18,10 +18,11 @@ jobs:
       - name: Install Ollama
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
-          nohup ollama serve > ollama.log 2>&1 &
+          # Start Ollama on 0.0.0.0 instead of localhost
+          nohup ollama serve --host 0.0.0.0:11434 > ollama.log 2>&1 &
           sleep 10
 
-      # Pull model
+      # Pull Qwen3 model
       - name: Pull Qwen3 model
         run: |
           ollama pull qwen3:0.6b
@@ -40,7 +41,7 @@ jobs:
       # Start Cloudflared tunnel
       - name: Start Cloudflared Tunnel
         run: |
-          nohup cloudflared tunnel --url http://localhost:11434 > cloudflared.log 2>&1 &
+          nohup cloudflared tunnel --url http://0.0.0.0:11434 > cloudflared.log 2>&1 &
           sleep 10
           echo "Tunnel URL:"
           grep -o 'https://.*trycloudflare.com' cloudflared.log | head -n 1
